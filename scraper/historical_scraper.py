@@ -167,17 +167,17 @@ def _extract_stats(plain_text, player_statistics, date):
     height = meta_data[length - 2].split('\'')[0] + '\'' + meta_data[length - 2].split('\'')[1].split('\"')[0]
     skill_map["Height"] = height
     skill_map['Weight'] = weight
-    if ('Position' in skill_map.keys()):
+    if 'Position' in skill_map.keys():
         if skill_map['Position'] in ('', 'RES', 'SUB'):
             skill_map['Position'] = soup.find('article').find('div', {'class': 'meta'}).find('span').text
-        if (skill_map['Position'] != 'GK'):
+        if skill_map['Position'] != 'GK':
             card_rows = soup.find('aside').find('div', {'class': 'card mb-2'}).find('div',
                                                                                     {'class': 'card-body'}).findAll(
-                'div', {'class': 'columns'})
+                                                                                            'div', {'class': 'columns'})
             for c_row in card_rows:
                 attributes = c_row.findAll('div', {'class': re.compile('column col-sm-2 text-center')})
                 for attribute in attributes:
-                    if (attribute.find('div')):
+                    if attribute.find('div'):
                         name = ''.join(re.findall('[a-zA-Z]', attribute.text))
                         value = attribute.text.replace(name, '').strip()
                         skill_map[str(name)] = value
@@ -198,7 +198,12 @@ def _extract_stats(plain_text, player_statistics, date):
             except IndexError:
                 value = 0
             name = ''.join(re.findall('[a-zA-Z]*', item.text))
-            skill_map[str(name)] = value
+            skill_map[str(name.lower())] = value
+
+    overall_attributes = soup.find('article').findAll('div', {'class': 'column col-4 text-center'})[0]
+    parse_overall_attribute = re.findall("^(\d{2})", overall_attributes.text)[0]
+
+    skill_map["overall_rating"] = int(parse_overall_attribute)
 
     player_stats = pd.DataFrame(skill_map, index=[date])
 
@@ -302,7 +307,7 @@ class HistoricalScraper:
                                                              player_statistics,
                                                              starting_fifa_version,
                                                              ending_fifa_version,
-                                                             save=True):
+                                                             save=False):
         all_players_size_index = 0
         all_players_size = len(player_ids) - 1
         all_player_stats = []
@@ -314,7 +319,7 @@ class HistoricalScraper:
                                                                                  player_id=player_id,
                                                                                  player_statistics=player_statistics,
                                                                                  fifa_version=fifa_version)
-                player_stats_for_version['player_id'] = [player_id for i in range(len(player_stats_for_version))]
+                player_stats_for_version['player_api_id'] = [player_id for i in range(len(player_stats_for_version))]
                 print(player_stats_for_version)
                 all_player_stats.append(player_stats_for_version)
             all_players_size_index += 1
@@ -328,7 +333,7 @@ class HistoricalScraper:
                                            f"{starting_fifa_version}_"
                                            f"{ending_fifa_version}_"
                                            f"{first_id}_"
-                                           f"{last_id}.parquet")
+                                           f"{last_id}.parquet", index=True)
 
         return all_player_stats_df
 
@@ -351,6 +356,8 @@ class HistoricalScraper:
             Year of the starting version of FIFA
         ending_fifa_version: int
             Year of the ending version of FIFA
+        n_threads: int
+            Number of threads to use during the computation
 
         Returns
         -------
@@ -368,6 +375,6 @@ class HistoricalScraper:
             player_stats = pool.starmap(self._single_thread_download_historical_player_statistics,
                                         threading_function_args)
 
-        all_player_stats_df = pd.concat(player_stats, ignore_index=True)
+        all_player_stats_df = pd.concat(player_stats, sort=True)
 
         return all_player_stats_df
