@@ -1,0 +1,4 @@
+bs4
+pandas==0.25.2
+requests
+pyarrow
