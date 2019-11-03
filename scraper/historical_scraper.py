@@ -1,5 +1,6 @@
 import datetime
 import re
+import warnings
 from multiprocessing.pool import Pool
 
 import numpy as np
@@ -26,6 +27,7 @@ def retrieve_raw_player_attributes(base_url, offset):
         The raw html containing the attributes of the players
     """
     url = base_url + str(offset)
+    print(url)
     source_code = requests.get(url)
     plain_text = source_code.text
     return plain_text
@@ -124,7 +126,7 @@ def _parse_fifa_update_date(plain_text):
     retrieved_fifa_version = soup.find('div', {'class': 'carousel-cell is-initial-select selected'})
 
     month_year_fifa_update = re.findall('^FIFA \d{2} (.* \d{4}).*$', retrieved_fifa_version.text)[0]
-    day_fifa_update = retrieved_fifa_version.find('a', {'class': 'bp3-tag p bp3-intent-primary'}).text
+    day_fifa_update = retrieved_fifa_version.find('a', {'class': 'bp3-intent-primary'}).text
 
     complete_date = day_fifa_update + " " + month_year_fifa_update
 
@@ -146,6 +148,8 @@ def _compute_id_splits(list_to_split, n_split):
     splitted_list: List
         A list containing the splitted list
     """
+    print(type(list_to_split))
+    print(len(list_to_split))
     return np.array_split(np.array(list_to_split), n_split)
 
 
@@ -157,7 +161,7 @@ def _extract_stats(plain_text, player_statistics, date):
     for column in columns:
         skills = column.findAll('li')
         for skill in skills:
-            if (skill.find('label') != None):
+            if skill.find('label') is not None:
                 label = skill.find('label').text
                 value = skill.text.replace(label, '').strip()
                 skill_map[label] = value
@@ -235,13 +239,12 @@ def retrieve_player_stats_by_fifa_update(player_url, player_statistics, fifa_ver
     base_fifa_version_url = f"?r={fifa_version}00{padded_update_version}&set=true"
     url = player_url + base_fifa_version_url
     plain_text = requests.get(url).text
-
     if not _source_update_version_is_valid(plain_text, fifa_version):
+        print(f"No data available for this player in this fifa version, {url}")
         return pd.DataFrame()
 
     date = _parse_fifa_update_date(plain_text)
     player_stats = _extract_stats(plain_text, player_statistics, date)
-
     return player_stats
 
 
@@ -267,13 +270,22 @@ def retrieve_player_stats_by_fifa_version(base_url, player_id, player_statistics
         particular update
     """
     all_player_stats = []
-
+    not_found = 0
     for update_version in range(1, LAST_UPDATE_PER_FIFA_VERSION[fifa_version] + 1):
+        print(f"{update_version} of {LAST_UPDATE_PER_FIFA_VERSION[fifa_version]}")
         player_url = base_url + str(player_id)
-        all_player_stats.append(retrieve_player_stats_by_fifa_update(player_url,
-                                                                     player_statistics,
-                                                                     fifa_version,
-                                                                     update_version))
+        player_stats_per_version = retrieve_player_stats_by_fifa_update(player_url,
+                                                                        player_statistics,
+                                                                        fifa_version,
+                                                                        update_version)
+        # If a player is not present in a particular update of the game, increase the not_found counter. If this
+        # happens at least 5 times, is reasonable to assume that the player is not present in the entire FIFA version
+        if len(player_stats_per_version) == 0:
+            not_found += 1
+            if not_found >= 1:
+                return pd.DataFrame()
+
+        all_player_stats.append(player_stats_per_version)
 
     return pd.concat(all_player_stats, sort=True)
 
@@ -285,8 +297,18 @@ class HistoricalScraper:
         self.player_attributes_url = player_attributes_url
         self.player_statistics_url = player_statistics_url
 
-    def download_all_player_attributes(self, player_attributes):
+    def download_all_player_attributes(self, player_attributes, starting_offset=0, output_file=None):
         """Download the attributes for all the players, according to the number of requests and to the chosen offset
+
+        Parameters
+        ----------
+        player_attributes: list
+            The list of player attributes to retrieve
+        starting_offset: int
+            The offset from which to start retrieving the players. Is useful if an error occurred in a previous
+            download
+        output_file: str
+            If present, the name of the output file where to save the players' attributes
 
         Returns
         -------
@@ -294,12 +316,24 @@ class HistoricalScraper:
             A DataFrame containing the attributes of all the retrieved players
         """
         all_player_attributes_dfs = []
+        final_offset = self.number_of_players_pages
 
-        for offset in range(0, self.number_of_players_pages):
-            plain_text = retrieve_raw_player_attributes(self.player_attributes_url, offset * self.player_per_request)
-            all_player_attributes_dfs.append(extract_player_attributes(plain_text, player_attributes))
+        for offset in range(starting_offset, final_offset):
+            print(f"Page number {offset} of {self.number_of_players_pages}")
+            try:
+                plain_text = retrieve_raw_player_attributes(self.player_attributes_url, offset * self.player_per_request)
+                all_player_attributes_dfs.append(extract_player_attributes(plain_text, player_attributes))
+            except requests.exceptions.ConnectionError:
+                warnings.warn("The server has interrupted the communication at ")
+                final_offset = offset
+                break
 
         player_attributes_df = pd.concat(all_player_attributes_dfs)
+
+        if output_file is not None:
+            player_attributes_df_unique = player_attributes_df.drop_duplicates()
+            player_attributes_df_unique.to_parquet(str(final_offset) + "_" + output_file)
+
         return player_attributes_df
 
     def _single_thread_download_historical_player_statistics(self,
@@ -314,14 +348,18 @@ class HistoricalScraper:
 
         for player_id in player_ids:
             print(f"Player {all_players_size_index} of {all_players_size}")
-            for fifa_version in range(starting_fifa_version, ending_fifa_version + 1):
-                player_stats_for_version = retrieve_player_stats_by_fifa_version(base_url=self.player_statistics_url,
-                                                                                 player_id=player_id,
-                                                                                 player_statistics=player_statistics,
-                                                                                 fifa_version=fifa_version)
-                player_stats_for_version['player_api_id'] = [player_id for i in range(len(player_stats_for_version))]
-                print(player_stats_for_version)
-                all_player_stats.append(player_stats_for_version)
+            try:
+                for fifa_version in range(starting_fifa_version, ending_fifa_version + 1):
+                    player_stats_for_version = retrieve_player_stats_by_fifa_version(base_url=self.player_statistics_url,
+                                                                                     player_id=player_id,
+                                                                                     player_statistics=player_statistics,
+                                                                                     fifa_version=fifa_version)
+                    player_stats_for_version['player_api_id'] = [player_id for i in range(len(player_stats_for_version))]
+                    print(player_stats_for_version)
+                    all_player_stats.append(player_stats_for_version)
+            except requests.exceptions.ConnectionError:
+                warnings.warn("The server has interrupted the communication at ")
+                break
             all_players_size_index += 1
 
         all_player_stats_df = pd.concat(all_player_stats, sort=True)
